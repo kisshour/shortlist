@@ -20,7 +20,7 @@ short_candidates = [
 if 'last_alert_times' not in st.session_state:
     st.session_state.last_alert_times = {}
 
-# 바이낸스 연결 설정 (타임아웃 연장)
+# 바이낸스 연결 설정 (IP 차단 대비 타임아웃 강화)
 exchange = ccxt.binance({
     'options': {'defaultType': 'future'},
     'enableRateLimit': True,
@@ -39,20 +39,21 @@ def fetch_data(symbol):
         loss = (-delta.clip(upper=0)).ewm(com=13).mean()
         rsi = 100 - (100 / (1 + (gain / loss)))
         return round(rsi.iloc[-1], 2), round(rsi.iloc[-2], 2), c.iloc[-1]
-    except:
+    except Exception as e:
         return None, None, None
 
 # --- [3. 웹 UI 구성] ---
-st.title("🛡️ v18.8 숏 바스켓 (진단 및 에러 방지)")
+st.title("🛡️ v18.9 숏 바스켓 (KeyError 해결 버전)")
 
-# 서버 연결 상태 진단 섹션
-with st.expander("📡 서버 연결 상태 확인 (Binance Connection)"):
+# [진단 섹션] 바이낸스 연결 확인
+with st.expander("📡 서버 연결 상태 진단 (필독)"):
     try:
         status = exchange.fetch_status()
         st.success(f"바이낸스 서버 연결 성공! (상태: {status.get('status')})")
     except Exception as e:
         st.error(f"바이낸스 연결 실패: {e}")
-        st.warning("⚠️ 현재 Streamlit 서버 IP가 바이낸스에 의해 차단된 상태일 수 있습니다.")
+        st.warning("⚠️ Streamlit 서버 IP가 바이낸스에 의해 차단되었을 가능성이 99%입니다.")
+        st.info("이 경우 가격이 모두 N/A로 표시되지만, 빨간 에러 화면은 나타나지 않습니다.")
 
 placeholder = st.empty()
 
@@ -62,7 +63,10 @@ while True:
         now_dt = datetime.now()
         st.subheader(f"⏱️ 마지막 갱신: {now_dt.strftime('%H:%M:%S')}")
 
+        # [핵심] 빈 데이터프레임을 미리 구조화하여 생성 (KeyError 방지)
+        columns = ["Symbol", "Price", "RSI (15m)", "Status"]
         data_list = []
+
         all_symbols = ['BTC/USDT', 'ETH/USDT'] + [s + '/USDT' for s in short_candidates]
 
         with st.spinner('데이터 수집 중...'):
@@ -70,16 +74,16 @@ while True:
                 rsi, rsi_prev, price = fetch_data(s)
                 base_sym = s.split('/')[0]
                 
-                # 데이터가 있든 없든 틀은 유지 (KeyError 방지 핵심)
+                # 데이터가 없어도 N/A로 행을 추가하여 구조 유지
                 row = {
                     "Symbol": base_sym,
                     "Price": f"${price:,.4f}" if price else "N/A",
-                    "RSI (15m)": rsi if rsi else 0.0,
+                    "RSI (15m)": rsi if rsi is not None else 0.0,
                     "Status": "🔴 SHORT" if rsi and rsi >= 70 else ("🟢 LONG" if rsi and rsi <= 30 else "⚪ WAIT")
                 }
                 data_list.append(row)
                 
-                # 텔레그램 알림 (데이터가 있을 때만)
+                # 텔레그램 알림 (데이터가 정상일 때만)
                 if rsi and base_sym in short_candidates:
                     direc = "SHORT" if rsi >= 70 else ("LONG" if rsi <= 30 else None)
                     if direc:
@@ -90,13 +94,12 @@ while True:
                             requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
                                           data={'chat_id': CHAT_ID, 'text': msg})
                             st.session_state.last_alert_times[l_key] = now_dt
-                
                 time.sleep(0.05)
 
-        # 데이터프레임 생성 시 컬럼명을 강제로 지정하여 에러 방지
-        df = pd.DataFrame(data_list, columns=["Symbol", "Price", "RSI (15m)", "Status"])
+        # 데이터프레임 생성 (컬럼 강제 지정)
+        df = pd.DataFrame(data_list, columns=columns)
         
-        # 표 출력 (정렬 적용)
+        # [정렬 및 출력] 데이터가 0인 상태여도 컬럼이 존재하므로 에러 없음
         st.table(df.sort_values(by="RSI (15m)", ascending=False).reset_index(drop=True))
         
         st.info("💡 30초마다 자동으로 새로고침됩니다.")
