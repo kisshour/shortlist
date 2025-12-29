@@ -17,22 +17,23 @@ short_candidates = [
     'KITE', 'XPL', 'TRUMP', 'BARD', 'KAITO', '2Z', 'PUMP', 'JTO'
 ]
 
-# 텔레그램 중복 알림 방지용 세션 상태 설정
 if 'last_alert_times' not in st.session_state:
     st.session_state.last_alert_times = {}
 
-exchange = ccxt.binance({'options': {'defaultType': 'future'}})
+# 바이낸스 선물 거래소 연결
+exchange = ccxt.binance({'options': {'defaultType': 'future'}, 'enableRateLimit': True})
 
 # --- [2. 기능 함수] ---
 def send_telegram(msg):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={'chat_id': CHAT_ID, 'text': msg})
+        requests.post(url, data={'chat_id': CHAT_ID, 'text': msg}, timeout=5)
     except: pass
 
 def fetch_data(symbol):
     try:
         bars = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=50)
+        if not bars: return None, None, None
         df = pd.DataFrame(bars, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
         c = df['c']
         delta = c.diff()
@@ -40,11 +41,11 @@ def fetch_data(symbol):
         loss = (-delta.clip(upper=0)).ewm(com=13).mean()
         rsi = 100 - (100 / (1 + (gain / loss)))
         return round(rsi.iloc[-1], 2), round(rsi.iloc[-2], 2), c.iloc[-1]
-    except: return None, None, None
+    except Exception as e:
+        return None, None, None
 
 # --- [3. 웹 UI 구성] ---
-st.title("🚀 v18.6 통합 숏 바스켓 대시보드")
-st.info("웹 모니터링 + 텔레그램 그룹방 알림이 동시에 작동 중입니다.")
+st.title("🚀 v18.7 통합 숏 바스켓 대시보드")
 
 placeholder = st.empty()
 
@@ -58,40 +59,44 @@ while True:
         data_list = []
         all_symbols = ['BTC/USDT', 'ETH/USDT'] + [s + '/USDT' for s in short_candidates]
 
-        for s in all_symbols:
-            rsi, rsi_prev, price = fetch_data(s)
-            if rsi is not None:
-                base_sym = s.split('/')[0]
-                status = "⚪ WAIT"
-                if rsi >= 70: status = "🔴 SHORT"
-                elif rsi <= 30: status = "🟢 LONG"
+        # 데이터 수집 시 프로그레스 바나 상태 메시지 표시
+        with st.spinner('데이터를 수집하고 있습니다...'):
+            for s in all_symbols:
+                rsi, rsi_prev, price = fetch_data(s)
+                if rsi is not None:
+                    base_sym = s.split('/')[0]
+                    status = "⚪ WAIT"
+                    if rsi >= 70: status = "🔴 SHORT"
+                    elif rsi <= 30: status = "🟢 LONG"
 
-                data_list.append({
-                    "Symbol": base_sym,
-                    "Price": f"${price:,.4f}" if price < 1 else f"${price:,.2f}",
-                    "RSI (15m)": rsi,
-                    "Status": status
-                })
+                    data_list.append({
+                        "Symbol": base_sym,
+                        "Price": f"${price:,.4f}" if price < 1 else f"${price:,.2f}",
+                        "RSI (15m)": rsi,
+                        "Status": status
+                    })
 
-                # --- 텔레그램 알림 로직 통합 ---
-                if base_sym in short_candidates:
-                    direc = None
-                    if rsi >= 70: direc = "SHORT"
-                    elif rsi <= 30: direc = "LONG"
+                    # 텔레그램 알림 로직
+                    if base_sym in short_candidates:
+                        direc = "SHORT" if rsi >= 70 else ("LONG" if rsi <= 30 else None)
+                        if direc:
+                            l_key = (base_sym, direc)
+                            last_time = st.session_state.last_alert_times.get(l_key)
+                            if last_time is None or (now_dt - last_time) > timedelta(hours=1):
+                                msg = f"[{curr_time}] {base_sym}\nPrice: ${price}\nRSI: {rsi}\nStatus: {direc} 진입"
+                                send_telegram(msg)
+                                st.session_state.last_alert_times[l_key] = now_dt
+                time.sleep(0.05) # 거래소 요청 제한 방지
 
-                    if direc:
-                        l_key = (base_sym, direc)
-                        last_time = st.session_state.last_alert_times.get(l_key)
-                        
-                        # 1시간 내 중복 알림 방지
-                        if last_time is None or (now_dt - last_time) > timedelta(hours=1):
-                            msg = f"[{curr_time}] {base_sym}\nPrice: ${price}\nRSI: {rsi}\nStatus: {direc} 진입 구간"
-                            send_telegram(msg)
-                            st.session_state.last_alert_times[l_key] = now_dt
-
-        # 화면 출력
-        df = pd.DataFrame(data_list)
-        st.table(df.sort_values(by="RSI (15m)", ascending=False).reset_index(drop=True))
+        # --- [에러 방지 핵심] 데이터가 있을 때만 정렬 및 출력 ---
+        if data_list:
+            df = pd.DataFrame(data_list)
+            # 컬럼명이 확실히 존재하는지 체크 후 정렬
+            if "RSI (15m)" in df.columns:
+                st.table(df.sort_values(by="RSI (15m)", ascending=False).reset_index(drop=True))
+            else:
+                st.write("데이터 컬럼을 생성하는 중 오류가 발생했습니다.")
+        else:
+            st.warning("거래소에서 데이터를 가져오지 못했습니다. 잠시 후 다시 시도합니다.")
         
-        # 새로고침 간격 (30초)
         time.sleep(30)
