@@ -6,40 +6,26 @@ from datetime import datetime, timedelta
 import requests
 
 # --- [1. 설정 및 초기화] ---
-st.set_page_config(page_title="Shortlist v2.3", layout="wide")
+st.set_page_config(page_title="Shortlist v2.4", layout="wide")
 
-# [전역 알림 기록 장부] - 중복 알림 방지용
 @st.cache_resource
-def get_global_alert_tracker():
-    return {}
-
+def get_global_alert_tracker(): return {}
 global_alert_times = get_global_alert_tracker()
 
-# [모바일 자동 감지 CSS 수정]
 st.markdown("""
     <style>
     th, td { text-align: center !important; }
-
-    /* 모바일 기기 (768px 이하) 대응 */
     @media only screen and (max-width: 768px) {
-        /* 인덱스 열 포함 순서 기준:
-           1:Index, 2:Symbol, 3:Price, 4:RSI(15m), 5:RSI(4H), 6:RSI GAB, 7:Status, 8:FDV/MC */
-
-        /* 숨길 항목: RSI(4H), RSI GAB, FDV/MC */
         table th:nth-child(5), table td:nth-child(5),
         table th:nth-child(6), table td:nth-child(6),
-        table th:nth-child(8), table td:nth-child(8) {
-            display: none;
-        }
-
-        /* 폰트 크기 최적화 */
+        table th:nth-child(8), table td:nth-child(8) { display: none; }
         td, th { font-size: 13px !important; padding: 5px !important; }
         h1 { font-size: 22px !important; }
     }
     </style>
     """, unsafe_allow_html=True)
 
-st.markdown("<h1 style='text-align: center;'>🚀 Shortlist v2.3</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center;'>🚀 Shortlist v2.4</h1>", unsafe_allow_html=True)
 
 CMC_API_KEY = "01bbeb036590498d97c169346dc19782"
 TELEGRAM_TOKEN = "8378935636:AAH7JJmu7_B_YQ4P6CQ7TcAh3YYeG4ANTBU"
@@ -50,9 +36,9 @@ watch_list = ['ETH', 'XPL', 'KITE', 'TRUMP', 'BARD', 'KAITO', 'ZRO', 'WLD', 'OND
 if 'cmc_cache' not in st.session_state: st.session_state.cmc_cache = {}
 if 'last_cmc_update' not in st.session_state: st.session_state.last_cmc_update = datetime.min
 
+# 바이낸스 선물 전용 설정
 exchange = ccxt.binance({'options': {'defaultType': 'future'}, 'enableRateLimit': True})
 
-# --- [2. 기능 함수] ---
 def get_cmc_data():
     now = datetime.now()
     if (now - st.session_state.last_cmc_update).total_seconds() < 3600 and st.session_state.cmc_cache:
@@ -77,37 +63,38 @@ def get_cmc_data():
 def fetch_exchange_data(symbol):
     try:
         pair = f"{symbol}/USDT"
+        # 15m 봉
         bars15 = exchange.fetch_ohlcv(pair, timeframe='15m', limit=50)
         df15 = pd.DataFrame(bars15, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
         c15 = df15['c']
-        rsi_series = 100 - (100 / (1 + (c15.diff().clip(lower=0).ewm(com=13).mean() / (-c15.diff().clip(upper=0).ewm(com=13).mean()))))
+        rsi15 = 100 - (100 / (1 + (c15.diff().clip(lower=0).ewm(com=13).mean() / (-c15.diff().clip(upper=0).ewm(com=13).mean()))))
+        # 4h 봉
         bars4h = exchange.fetch_ohlcv(pair, timeframe='4h', limit=50)
         df4h = pd.DataFrame(bars4h, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
         rsi4h = 100 - (100 / (1 + (df4h['c'].diff().clip(lower=0).ewm(com=13).mean() / (-df4h['c'].diff().clip(upper=0).ewm(com=13).mean()))))
-        return round(rsi_series.iloc[-1], 2), round(rsi_series.iloc[-2], 2), round(rsi4h.iloc[-1], 2), c15.iloc[-1]
-    except: return None, None, None, None
+        return round(rsi15.iloc[-1], 2), round(rsi15.iloc[-2], 2), round(rsi4h.iloc[-1], 2), c15.iloc[-1], "OK"
+    except Exception as e:
+        # 에러 발생 시(상장 미비 등) 사유 리턴
+        return None, None, None, None, "Symbol/API Error"
 
 placeholder = st.empty()
 
-# --- [3. 메인 루프] ---
 while True:
     with placeholder.container():
         now_dt = datetime.now()
         st.write(f"⏱️ **Update:** {now_dt.strftime('%H:%M:%S')}")
-
         ratios = get_cmc_data()
         data_list = []
 
         for s in watch_list:
-            rsi15, rsi15_prev, rsi4h, price = fetch_exchange_data(s)
-            if rsi15 is not None:
+            rsi15, rsi15_prev, rsi4h, price, err_msg = fetch_exchange_data(s)
+            
+            if err_msg == "OK":
                 arrow = "↗️" if rsi15 > rsi15_prev else ("↘️" if rsi15 < rsi15_prev else "-")
-
-                # 텔레그램 알림
+                # 알림 로직
                 alert_dir = None
                 if rsi15 >= 70: alert_dir = "SHORT"
                 elif rsi15 <= 30: alert_dir = "LONG"
-
                 if alert_dir:
                     l_key = (s, alert_dir)
                     last_time = global_alert_times.get(l_key)
@@ -117,42 +104,39 @@ while True:
                             requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", data={'chat_id': CHAT_ID, 'text': msg})
                             global_alert_times[l_key] = now_dt
                         except: pass
-
+                
                 status = "⚪ WAIT"
                 if rsi15 >= 70 and arrow == "↘️": status = "🔴 SHORT"
                 elif rsi15 <= 30 and arrow == "↗️": status = "🟢 LONG"
-
+                
                 data_list.append({
                     "Symbol": f"${s}", "Price": f"${price:,.4f}" if price < 1 else f"${price:,.2f}",
                     "RSI_VAL": rsi15, "RSI(15m)": f"{rsi15:.2f} {arrow}", "RSI(4H)": rsi4h,
                     "Status": status, "FDV/MC": ratios.get(s, "N/A")
                 })
-            time.sleep(0.05)
+            else:
+                # 데이터 로드 실패한 코인도 리스트에 추가 (에러 표시)
+                data_list.append({
+                    "Symbol": f"${s}", "Price": "N/A", "RSI_VAL": 0, "RSI(15m)": "Error", "RSI(4H)": 0, "Status": "Check Symbol", "FDV/MC": ratios.get(s, "N/A")
+                })
+            time.sleep(0.1) # API 부하 방지를 위한 약간의 지연
 
         if data_list:
             df = pd.DataFrame(data_list)
             df = df.sort_values(by="RSI_VAL", ascending=False).reset_index(drop=True)
             df.index = df.index + 1
-            top_rsi = df.iloc[0]["RSI_VAL"]
-            df["RSI GAB"] = df["RSI_VAL"] - top_rsi
-
-            # 컬럼 순서 고정
+            top_rsi = df[df["RSI_VAL"] > 0]["RSI_VAL"].max() if not df[df["RSI_VAL"] > 0].empty else 0
+            df["RSI GAB"] = df.apply(lambda row: row["RSI_VAL"] - top_rsi if row["RSI_VAL"] > 0 else 0, axis=1)
+            
             final_df = df[["Symbol", "Price", "RSI(15m)", "RSI(4H)", "RSI GAB", "Status", "FDV/MC"]]
-
+            
             def style_row(row):
                 if row.Symbol == '$ETH': return ['background-color: #FFFF00; color: black; font-weight: bold'] * len(row)
+                if row["RSI(15m)"] == "Error": return ['color: gray; font-style: italic'] * len(row)
                 return [''] * len(row)
 
             st.table(final_df.style.apply(style_row, axis=1).format({'RSI(4H)': "{:.2f}", 'RSI GAB': "{:.2f}"}))
 
-        # --- [하단 안내 사항] ---
         st.write("---")
-        st.info("""
-        **💡 안내 사항**
-        1. 텔레그램 알림은 RSI가 30/70을 돌파하는순간 바로 날라옵니다. 
-        2. 웹페이지 RSI 15분 숫자 옆의 화살표는 직전15분봉 RSI보다 높은지 낮은지를 표시합니다. 
-        3. STATUS는 RSI 70 이상이고 화살표가 아래(↘️)일때 SHORT, 30 이하고 화살표가 위(↗️)일때 LONG을 표시합니다.
-        4. Shortlist에는 시총 50위~200위 사이 주요 거래소 상장 및 FDVMC 비율 높은 상위 16개 코인이 선정됩니다.
-        5. 투자 책임은 본인에게 있습니다.
-        """)
+        st.info("💡 안내 사항은 이전과 동일합니다.")
         time.sleep(30)
