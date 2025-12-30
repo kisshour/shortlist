@@ -4,16 +4,15 @@ import pandas as pd
 import time
 from datetime import datetime, timedelta
 import requests
+import gc  # 메모리 관리를 위한 가비지 컬렉터
 
 # --- [1. 설정 및 초기화] ---
-st.set_page_config(page_title="Shortlist v2.5", layout="wide")
+st.set_page_config(page_title="Shortlist v2.6", layout="wide")
 
-# 전역 알림 기록 장부 (중복 알림 방지)
 @st.cache_resource
 def get_global_alert_tracker(): return {}
 global_alert_times = get_global_alert_tracker()
 
-# 자동 감지 및 CSS (모바일 최적화)
 st.markdown("""
     <style>
     th, td { text-align: center !important; }
@@ -27,7 +26,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.markdown("<h1 style='text-align: center;'>🚀 Shortlist v2.5</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center;'>🚀 Shortlist v2.6 (Memory Optimized)</h1>", unsafe_allow_html=True)
 
 CMC_API_KEY = "01bbeb036590498d97c169346dc19782"
 TELEGRAM_TOKEN = "8378935636:AAH7JJmu7_B_YQ4P6CQ7TcAh3YYeG4ANTBU"
@@ -38,6 +37,7 @@ watch_list = ['ETH', 'XPL', 'KITE', 'TRUMP', 'BARD', 'KAITO', 'ZRO', 'WLD', 'OND
 if 'cmc_cache' not in st.session_state: st.session_state.cmc_cache = {}
 if 'last_cmc_update' not in st.session_state: st.session_state.last_cmc_update = datetime.min
 
+# 바이낸스 연결 객체 생성 (전역)
 exchange = ccxt.binance({'options': {'defaultType': 'future'}, 'enableRateLimit': True})
 
 def get_cmc_data():
@@ -64,14 +64,21 @@ def get_cmc_data():
 def fetch_exchange_data(symbol):
     try:
         pair = f"{symbol}/USDT"
-        bars15 = exchange.fetch_ohlcv(pair, timeframe='15m', limit=50)
+        # 메모리 절약을 위해 limit을 50에서 35로 축소 (RSI 계산에는 30개면 충분)
+        bars15 = exchange.fetch_ohlcv(pair, timeframe='15m', limit=35)
         df15 = pd.DataFrame(bars15, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
         c15 = df15['c']
         rsi15 = 100 - (100 / (1 + (c15.diff().clip(lower=0).ewm(com=13).mean() / (-c15.diff().clip(upper=0).ewm(com=13).mean()))))
-        bars4h = exchange.fetch_ohlcv(pair, timeframe='4h', limit=50)
+        
+        bars4h = exchange.fetch_ohlcv(pair, timeframe='4h', limit=35)
         df4h = pd.DataFrame(bars4h, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
         rsi4h = 100 - (100 / (1 + (df4h['c'].diff().clip(lower=0).ewm(com=13).mean() / (-df4h['c'].diff().clip(upper=0).ewm(com=13).mean()))))
-        return round(rsi15.iloc[-1], 2), round(rsi15.iloc[-2], 2), round(rsi4h.iloc[-1], 2), c15.iloc[-1], "OK"
+        
+        res = (round(rsi15.iloc[-1], 2), round(rsi15.iloc[-2], 2), round(rsi4h.iloc[-1], 2), c15.iloc[-1], "OK")
+        
+        # 데이터프레임 명시적 삭제로 메모리 확보
+        del df15, df4h, bars15, bars4h
+        return res
     except: return None, None, None, None, "Error"
 
 placeholder = st.empty()
@@ -130,15 +137,19 @@ while True:
                 return [''] * len(row)
 
             st.table(final_df.style.apply(style_row, axis=1).format({'RSI(4H)': "{:.2f}", 'RSI GAB': "{:.2f}"}))
+            del df, final_df # 메모리 비우기
 
-        # --- [하단 안내 사항 복구] ---
+        # --- [하단 안내 사항] ---
         st.write("---")
         st.info("""
         **💡 안내 사항**
         1. 텔레그램 알림은 RSI가 30/70을 돌파하는순간 바로 날라옵니다. 
         2. 웹페이지 RSI 15분 숫자 옆의 화살표는 직전 RSI보다 높은지 낮은지를 표시합니다. 
         3. STATUS는 RSI 70 이상이고 화살표가 아래일때 SHORT, 30 이하고 화살표가 위일때 LONG을 표시합니다. (추세 전환 확인후 STATUS가 변경됩니다)
-        4. Shortlist에는 시총 50위~200위 사이 코인중 바이낸스, 코인베이스, 업비트, 빗썸에 모두 상장된 코인중 FDVMC비율이 높은 상위 17개 코인이 선정됩니다.
+        4. Shortlist에는 시총 50위~200위 사이 코인중 바이낸스, 코인베이스, 업비트, 빗썸에 모두 상장된 코인중 FDVMC비율이 높은 상위 16개 코인과 비교용 이더리움이 올라갑니다.
         5. 단순한 참고지표일뿐 투자는 본인 책임입니다.
         """)
+        
+        # 가비지 컬렉터 강제 실행 (메모리 청소)
+        gc.collect()
         time.sleep(30)
