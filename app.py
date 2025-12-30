@@ -6,12 +6,14 @@ from datetime import datetime, timedelta
 import requests
 
 # --- [1. 설정 및 초기화] ---
-st.set_page_config(page_title="Shortlist v2.4", layout="wide")
+st.set_page_config(page_title="Shortlist v2.5", layout="wide")
 
+# 전역 알림 기록 장부 (중복 알림 방지)
 @st.cache_resource
 def get_global_alert_tracker(): return {}
 global_alert_times = get_global_alert_tracker()
 
+# 자동 감지 및 CSS (모바일 최적화)
 st.markdown("""
     <style>
     th, td { text-align: center !important; }
@@ -25,7 +27,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.markdown("<h1 style='text-align: center;'>🚀 Shortlist v2.4</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center;'>🚀 Shortlist v2.5</h1>", unsafe_allow_html=True)
 
 CMC_API_KEY = "01bbeb036590498d97c169346dc19782"
 TELEGRAM_TOKEN = "8378935636:AAH7JJmu7_B_YQ4P6CQ7TcAh3YYeG4ANTBU"
@@ -36,7 +38,6 @@ watch_list = ['ETH', 'XPL', 'KITE', 'TRUMP', 'BARD', 'KAITO', 'ZRO', 'WLD', 'OND
 if 'cmc_cache' not in st.session_state: st.session_state.cmc_cache = {}
 if 'last_cmc_update' not in st.session_state: st.session_state.last_cmc_update = datetime.min
 
-# 바이낸스 선물 전용 설정
 exchange = ccxt.binance({'options': {'defaultType': 'future'}, 'enableRateLimit': True})
 
 def get_cmc_data():
@@ -63,19 +64,15 @@ def get_cmc_data():
 def fetch_exchange_data(symbol):
     try:
         pair = f"{symbol}/USDT"
-        # 15m 봉
         bars15 = exchange.fetch_ohlcv(pair, timeframe='15m', limit=50)
         df15 = pd.DataFrame(bars15, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
         c15 = df15['c']
         rsi15 = 100 - (100 / (1 + (c15.diff().clip(lower=0).ewm(com=13).mean() / (-c15.diff().clip(upper=0).ewm(com=13).mean()))))
-        # 4h 봉
         bars4h = exchange.fetch_ohlcv(pair, timeframe='4h', limit=50)
         df4h = pd.DataFrame(bars4h, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
         rsi4h = 100 - (100 / (1 + (df4h['c'].diff().clip(lower=0).ewm(com=13).mean() / (-df4h['c'].diff().clip(upper=0).ewm(com=13).mean()))))
         return round(rsi15.iloc[-1], 2), round(rsi15.iloc[-2], 2), round(rsi4h.iloc[-1], 2), c15.iloc[-1], "OK"
-    except Exception as e:
-        # 에러 발생 시(상장 미비 등) 사유 리턴
-        return None, None, None, None, "Symbol/API Error"
+    except: return None, None, None, None, "Error"
 
 placeholder = st.empty()
 
@@ -88,13 +85,12 @@ while True:
 
         for s in watch_list:
             rsi15, rsi15_prev, rsi4h, price, err_msg = fetch_exchange_data(s)
-            
             if err_msg == "OK":
                 arrow = "↗️" if rsi15 > rsi15_prev else ("↘️" if rsi15 < rsi15_prev else "-")
-                # 알림 로직
                 alert_dir = None
                 if rsi15 >= 70: alert_dir = "SHORT"
                 elif rsi15 <= 30: alert_dir = "LONG"
+                
                 if alert_dir:
                     l_key = (s, alert_dir)
                     last_time = global_alert_times.get(l_key)
@@ -115,11 +111,10 @@ while True:
                     "Status": status, "FDV/MC": ratios.get(s, "N/A")
                 })
             else:
-                # 데이터 로드 실패한 코인도 리스트에 추가 (에러 표시)
                 data_list.append({
                     "Symbol": f"${s}", "Price": "N/A", "RSI_VAL": 0, "RSI(15m)": "Error", "RSI(4H)": 0, "Status": "Check Symbol", "FDV/MC": ratios.get(s, "N/A")
                 })
-            time.sleep(0.1) # API 부하 방지를 위한 약간의 지연
+            time.sleep(0.05)
 
         if data_list:
             df = pd.DataFrame(data_list)
@@ -132,11 +127,18 @@ while True:
             
             def style_row(row):
                 if row.Symbol == '$ETH': return ['background-color: #FFFF00; color: black; font-weight: bold'] * len(row)
-                if row["RSI(15m)"] == "Error": return ['color: gray; font-style: italic'] * len(row)
                 return [''] * len(row)
 
             st.table(final_df.style.apply(style_row, axis=1).format({'RSI(4H)': "{:.2f}", 'RSI GAB': "{:.2f}"}))
 
+        # --- [하단 안내 사항 복구] ---
         st.write("---")
-        st.info("💡 안내 사항은 이전과 동일합니다.")
+        st.info("""
+        **💡 안내 사항**
+        1. 텔레그램 알림은 RSI가 30/70을 돌파하는순간 바로 날라옵니다. 
+        2. 웹페이지 RSI 15분 숫자 옆의 화살표는 직전 RSI보다 높은지 낮은지를 표시합니다. 
+        3. STATUS는 RSI 70 이상이고 화살표가 아래일때 SHORT, 30 이하고 화살표가 위일때 LONG을 표시합니다. (추세 전환 확인후 STATUS가 변경됩니다)
+        4. Shortlist에는 시총 50위~200위 사이 코인중 바이낸스, 코인베이스, 업비트, 빗썸에 모두 상장된 코인중 FDVMC비율이 높은 상위 17개 코인이 선정됩니다.
+        5. 단순한 참고지표일뿐 투자는 본인 책임입니다.
+        """)
         time.sleep(30)
